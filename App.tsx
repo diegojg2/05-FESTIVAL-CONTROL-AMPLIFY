@@ -3,11 +3,12 @@ import { SafeAreaView, ScrollView, View, Text, TextInput, Pressable, StyleSheet,
 import { initialEvents, FestivalEvent, EventStatus } from './src/data';
 import { theme as c } from './src/theme';
 
+const STORAGE_KEY = 'festival-control-events-v1';
+const useLocalApi = typeof window !== 'undefined' && window.location.hostname === 'localhost';
+
 const apiUrl = (path: string) => {
-  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
-    return `${window.location.origin}${path}`;
-  }
-  return `http://localhost:3001${path}`;
+  if (useLocalApi) return `http://localhost:3001${path}`;
+  return null;
 };
 
 type Page = 'dashboard' | 'events' | 'form';
@@ -49,9 +50,35 @@ export default function App() {
   const [status,setStatus] = useState<EventStatus>('CONFIRMED');
   const [notice,setNotice] = useState('');
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const saved = window.localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved) as FestivalEvent[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setEvents(parsed);
+          return;
+        }
+      } catch (_error) {
+        // ignore invalid saved data and fall through to initial events
+      }
+    }
+    setEvents(initialEvents);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(events));
+    }
+  }, [events]);
+
   const loadEvents = async () => {
+    const localApi = apiUrl('/api/events');
+    if (!localApi) return;
+
     try {
-      const response = await fetch(apiUrl('/api/events'));
+      const response = await fetch(localApi);
       if (!response.ok) throw new Error('No se pudo cargar la lista');
       const data = await response.json();
       if (Array.isArray(data)) setEvents(data);
@@ -68,72 +95,101 @@ export default function App() {
   const filtered = useMemo(() => events.filter(e => (filter === 'TODOS' || e.space === filter) && (e.artist.toLowerCase().includes(search.toLowerCase()) || e.id.toLowerCase().includes(search.toLowerCase()))),[events,search,filter]);
   const openNew = () => {setEditing(null);setArtist('');setSpace(stages[0]);setTime('21:45');setStatus('CONFIRMED');setNotice('');setPage('form');};
   const openEdit = (e: FestivalEvent) => {setEditing(e.id);setArtist(e.artist);setSpace(e.space);setTime(e.time);setStatus(e.status);setNotice('');setPage('form');};
+  const persistAndSave = (updater: (value: FestivalEvent[]) => FestivalEvent[]) => {
+    setEvents((current) => {
+      const next = updater(current);
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      }
+      return next;
+    });
+  };
+
   const save = async () => {
     if(!artist.trim() || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)){setNotice('Introduce un artista y una hora válida (HH:MM).');return;}
 
     const payload = { artist: artist.trim().toUpperCase(), space, time, status };
+    const localApi = apiUrl('/api/events');
 
     try {
-      if (editing) {
-        const response = await fetch(apiUrl(`/api/events/${editing}`), {
+      if (editing && localApi) {
+        const response = await fetch(`${localApi.replace('/api/events', `/api/events/${editing}`)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
         if (!response.ok) throw new Error('No se pudo actualizar');
         const updated = await response.json();
-        setEvents(v => v.map(e => e.id === editing ? updated : e));
+        persistAndSave((current) => current.map((e) => e.id === editing ? updated : e));
         setNotice('Evento actualizado y guardado.');
-      } else {
-        const response = await fetch(apiUrl('/api/events'), {
+      } else if (!editing && localApi) {
+        const response = await fetch(localApi, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
         if (!response.ok) throw new Error('No se pudo crear');
         const created = await response.json();
-        setEvents(v => [created, ...v]);
+        persistAndSave((current) => [created, ...current]);
         setNotice('Evento creado y guardado.');
+      } else if (editing) {
+        persistAndSave((current) => current.map((e) => e.id === editing ? { ...e, ...payload } : e));
+        setNotice('Evento guardado en el navegador (Amplify Hosting).');
+      } else {
+        const id='EVT-'+Date.now().toString().slice(-7);
+        persistAndSave((current) => [{id,...payload}, ...current]);
+        setNotice('Evento guardado en el navegador (Amplify Hosting).');
       }
     } catch (error) {
       if (editing) {
-        setEvents(v => v.map(e => e.id === editing ? {...e, ...payload} : e));
+        persistAndSave((current) => current.map((e) => e.id === editing ? { ...e, ...payload } : e));
         setNotice('Se guardó localmente porque la API no respondió.');
       } else {
         const id='EVT-'+Date.now().toString().slice(-7);
-        setEvents(v=>[{id,...payload},...v]);
+        persistAndSave((current) => [{id,...payload}, ...current]);
         setNotice('Se guardó localmente porque la API no respondió.');
       }
     }
     setPage('events');
   };
+
   const changeStatus = async (id:string) => {
     const current = events.find(e => e.id === id);
     const nextStatus = current?.status === 'CONFIRMED' ? 'DELAYED' : current?.status === 'DELAYED' ? 'CANCELLED' : 'CONFIRMED';
+    const localApi = apiUrl(`/api/events/${id}`);
 
     try {
-      const response = await fetch(apiUrl(`/api/events/${id}`), {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: nextStatus }),
-      });
-      if (!response.ok) throw new Error('No se pudo cambiar el estado');
-      const updated = await response.json();
-      setEvents(v => v.map(e => e.id === id ? updated : e));
-      setNotice('Estado actualizado.');
+      if (localApi) {
+        const response = await fetch(localApi, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: nextStatus }),
+        });
+        if (!response.ok) throw new Error('No se pudo cambiar el estado');
+        const updated = await response.json();
+        persistAndSave((v: FestivalEvent[]) => v.map(e => e.id === id ? updated : e));
+        setNotice('Estado actualizado.');
+        return;
+      }
+      persistAndSave((v: FestivalEvent[]) => v.map(e => e.id === id ? { ...e, status: nextStatus ?? e.status } : e));
+      setNotice('Estado actualizado en el navegador.');
     } catch (error) {
-      setEvents(v => v.map(e => e.id === id ? { ...e, status: nextStatus ?? e.status } : e));
+      persistAndSave((v: FestivalEvent[]) => v.map(e => e.id === id ? { ...e, status: nextStatus ?? e.status } : e));
       setNotice('Estado actualizado localmente.');
     }
   };
   const remove = async (id:string) => {
+    const localApi = apiUrl(`/api/events/${id}`);
+
     try {
-      const response = await fetch(apiUrl(`/api/events/${id}`), { method: 'DELETE' });
-      if (!response.ok) throw new Error('No se pudo eliminar');
-      setEvents(v => v.filter(e => e.id !== id));
+      if (localApi) {
+        const response = await fetch(localApi, { method: 'DELETE' });
+        if (!response.ok) throw new Error('No se pudo eliminar');
+      }
+      persistAndSave((v: FestivalEvent[]) => v.filter(e => e.id !== id));
       setNotice('Evento eliminado.');
     } catch (error) {
-      setEvents(v => v.filter(e => e.id !== id));
+      persistAndSave((v: FestivalEvent[]) => v.filter(e => e.id !== id));
       setNotice('Evento eliminado localmente.');
     }
   };
