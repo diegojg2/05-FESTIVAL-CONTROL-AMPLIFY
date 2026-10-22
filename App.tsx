@@ -1,7 +1,14 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { SafeAreaView, ScrollView, View, Text, TextInput, Pressable, StyleSheet, useWindowDimensions } from 'react-native';
 import { initialEvents, FestivalEvent, EventStatus } from './src/data';
 import { theme as c } from './src/theme';
+
+const apiUrl = (path: string) => {
+  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
+    return `${window.location.origin}${path}`;
+  }
+  return `http://localhost:3001${path}`;
+};
 
 type Page = 'dashboard' | 'events' | 'form';
 const stages = ['MAIN STAGE', 'GARDEN', 'WAREHOUSE', 'RIVER STAGE'];
@@ -42,17 +49,94 @@ export default function App() {
   const [status,setStatus] = useState<EventStatus>('CONFIRMED');
   const [notice,setNotice] = useState('');
 
+  const loadEvents = async () => {
+    try {
+      const response = await fetch(apiUrl('/api/events'));
+      if (!response.ok) throw new Error('No se pudo cargar la lista');
+      const data = await response.json();
+      if (Array.isArray(data)) setEvents(data);
+    } catch (error) {
+      setEvents(initialEvents);
+      setNotice('API no disponible; usando datos iniciales locales.');
+    }
+  };
+
+  useEffect(() => {
+    void loadEvents();
+  }, []);
+
   const filtered = useMemo(() => events.filter(e => (filter === 'TODOS' || e.space === filter) && (e.artist.toLowerCase().includes(search.toLowerCase()) || e.id.toLowerCase().includes(search.toLowerCase()))),[events,search,filter]);
   const openNew = () => {setEditing(null);setArtist('');setSpace(stages[0]);setTime('21:45');setStatus('CONFIRMED');setNotice('');setPage('form');};
   const openEdit = (e: FestivalEvent) => {setEditing(e.id);setArtist(e.artist);setSpace(e.space);setTime(e.time);setStatus(e.status);setNotice('');setPage('form');};
-  const save = () => {
+  const save = async () => {
     if(!artist.trim() || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)){setNotice('Introduce un artista y una hora válida (HH:MM).');return;}
-    if(editing){setEvents(v => v.map(e => e.id === editing ? {...e,artist:artist.trim().toUpperCase(),space,time,status} : e));setNotice('Evento actualizado (datos locales).');}
-    else {const id='EVT-'+Date.now().toString().slice(-7);setEvents(v=>[{id,artist:artist.trim().toUpperCase(),space,time,status},...v]);setNotice('Evento creado (datos locales).');}
+
+    const payload = { artist: artist.trim().toUpperCase(), space, time, status };
+
+    try {
+      if (editing) {
+        const response = await fetch(apiUrl(`/api/events/${editing}`), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error('No se pudo actualizar');
+        const updated = await response.json();
+        setEvents(v => v.map(e => e.id === editing ? updated : e));
+        setNotice('Evento actualizado y guardado.');
+      } else {
+        const response = await fetch(apiUrl('/api/events'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error('No se pudo crear');
+        const created = await response.json();
+        setEvents(v => [created, ...v]);
+        setNotice('Evento creado y guardado.');
+      }
+    } catch (error) {
+      if (editing) {
+        setEvents(v => v.map(e => e.id === editing ? {...e, ...payload} : e));
+        setNotice('Se guardó localmente porque la API no respondió.');
+      } else {
+        const id='EVT-'+Date.now().toString().slice(-7);
+        setEvents(v=>[{id,...payload},...v]);
+        setNotice('Se guardó localmente porque la API no respondió.');
+      }
+    }
     setPage('events');
   };
-  const changeStatus = (id:string) => {setEvents(v=>v.map(e=>e.id===id?{...e,status:e.status==='CONFIRMED'?'DELAYED':e.status==='DELAYED'?'CANCELLED':'CONFIRMED'}:e));setNotice('Estado actualizado localmente.');};
-  const remove = (id:string) => {setEvents(v=>v.filter(e=>e.id!==id));setNotice('Evento eliminado localmente.');};
+  const changeStatus = async (id:string) => {
+    const current = events.find(e => e.id === id);
+    const nextStatus = current?.status === 'CONFIRMED' ? 'DELAYED' : current?.status === 'DELAYED' ? 'CANCELLED' : 'CONFIRMED';
+
+    try {
+      const response = await fetch(apiUrl(`/api/events/${id}`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (!response.ok) throw new Error('No se pudo cambiar el estado');
+      const updated = await response.json();
+      setEvents(v => v.map(e => e.id === id ? updated : e));
+      setNotice('Estado actualizado.');
+    } catch (error) {
+      setEvents(v => v.map(e => e.id === id ? { ...e, status: nextStatus ?? e.status } : e));
+      setNotice('Estado actualizado localmente.');
+    }
+  };
+  const remove = async (id:string) => {
+    try {
+      const response = await fetch(apiUrl(`/api/events/${id}`), { method: 'DELETE' });
+      if (!response.ok) throw new Error('No se pudo eliminar');
+      setEvents(v => v.filter(e => e.id !== id));
+      setNotice('Evento eliminado.');
+    } catch (error) {
+      setEvents(v => v.filter(e => e.id !== id));
+      setNotice('Evento eliminado localmente.');
+    }
+  };
   const confirmed = events.filter(e=>e.status==='CONFIRMED').length;
   const delayed = events.filter(e=>e.status==='DELAYED').length;
   return <SafeAreaView style={s.root}>
